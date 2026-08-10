@@ -1,0 +1,10 @@
+{
+  "name": "AURA Spatial Intelligence Engine",
+  "description": "Real-time spatial recognition and telemetry dashboard powered by YOLOv8, pgvector, and FastAPI simulation.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
