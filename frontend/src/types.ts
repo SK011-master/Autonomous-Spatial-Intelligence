@@ -103,4 +103,5 @@ export interface SystemConfig {
   showZones: boolean;
   soundEnabled: boolean;
   detectionThreshold: number; // 0.5 to 0.99
+  environmentMode?: 'indoor' | 'outdoor';
 }

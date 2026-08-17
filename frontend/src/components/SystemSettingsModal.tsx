@@ -11,7 +11,8 @@ import {
   Cpu,
   Check,
   Shield,
-  Zap
+  Zap,
+  Layers
 } from 'lucide-react';
 import { SystemConfig } from '../types';
 import { audioEngine } from '../lib/audio';
@@ -55,6 +56,22 @@ export const SystemSettingsModal: React.FC<SystemSettingsModalProps> = ({
     setTimeout(() => {
       setAddSuccessMsg(false);
     }, 2500);
+  };
+
+  const handleModeSwitch = async (mode: 'indoor' | 'outdoor') => {
+    try {
+      const res = await fetch('http://localhost:8000/api/v1/engine/mode', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode }),
+      });
+      if (res.ok) {
+        setConfig((prev) => ({ ...prev, environmentMode: mode }));
+        if (config.soundEnabled) audioEngine.playTargetAcquired();
+      }
+    } catch (error) {
+      console.error("Mode switch failed:", error);
+    }
   };
 
   return (
@@ -120,6 +137,29 @@ export const SystemSettingsModal: React.FC<SystemSettingsModalProps> = ({
               <p className="text-[10px] text-zinc-400 uppercase tracking-wider">
                 Higher threshold eliminates false positives in dark conditions.
               </p>
+            </div>
+
+            {/* Environment Mode Switcher */}
+            <div className="space-y-3 p-4 rounded bg-white/5 border border-white/10">
+              <span className="text-white font-bold flex items-center gap-2 uppercase tracking-wider text-[10px]">
+                <Layers className="w-4 h-4 text-emerald-400" />
+                Environment Taxonomy Mode
+              </span>
+              <div className="grid grid-cols-2 gap-2">
+                {(['indoor', 'outdoor'] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    onClick={() => handleModeSwitch(mode)}
+                    className={`py-2 px-3 rounded border font-bold uppercase tracking-wider text-[10px] transition-all flex justify-center items-center gap-2 ${
+                      config.environmentMode === mode
+                        ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-300 shadow-[0_0_10px_rgba(16,185,129,0.2)]'
+                        : 'bg-black/50 border-white/10 text-zinc-500 hover:text-zinc-300'
+                    }`}
+                  >
+                    {mode} {config.environmentMode === mode && <Check className="w-3 h-3" />}
+                  </button>
+                ))}
+              </div>
             </div>
 
             {/* Quick Feature Toggles */}

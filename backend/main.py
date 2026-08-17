@@ -1,6 +1,7 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from ultralytics import YOLO, settings
+from ultralytics import settings, YOLOWorld
+from pydantic import BaseModel
 import cv2
 import base64
 import numpy as np
@@ -10,7 +11,6 @@ from typing import List, Dict, Any
 from scene_graph import analyze_scene_context, determine_activity_status
 from face_engine import extract_face_data
 from database import init_db, register_face, recognize_face
-from ultralytics import YOLOWorld
 
 app = FastAPI(
     title="The Core - Spatial Intelligence Engine",
@@ -26,7 +26,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize database table on server startup
 @app.on_event("startup")
 def startup_event():
     init_db()
@@ -34,43 +33,73 @@ def startup_event():
 # Model Path Configuration
 models_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 settings.update({"weights_dir": models_dir})
-model_path = os.path.join(models_dir, "yolov8m.pt") # or yolov8m.pt
-#model_path = os.path.join(models_dir, "yolov8s-world.pt")
+model_path = os.path.join(models_dir, "yolov8s-world.pt")
 
-model = YOLO(model_path)
-# model = YOLOWorld(model_path)
+# =====================================================================
+# DUAL TAXONOMY MODELS: Pre-loaded into VRAM to prevent PyTorch crashes
+# =====================================================================
+print("⏳ Loading Spatial Engines into VRAM...")
 
-# #2. Define ANYTHING you want your spatial engine to recognize!
-# model.set_classes([
-#     "person", 
-#     "eyeglasses", 
-#     "screwdriver", 
-#     "skincare box", 
-#     "mechanical keyboard", 
-#     "computer monitor", 
-#     "mouse", 
-#     "chair", 
-#     "bottle",
-#     "electric fan"
-# ])
+# 1. Initialize Indoor Engine
+model_indoor = YOLOWorld(model_path)
+model_indoor.set_classes([
+    "person", "eyeglasses", "screwdriver", "skincare box", 
+    "mechanical keyboard", "computer monitor", "mouse", "chair", 
+    "bottle", "electric fan", "laptop", "television", "cell phone", 
+    "desk", "couch", "potted plant", "cup", "book", "remote", 
+    "clock", "backpack", "scissors", "door", "box", "head"
+])
+model_indoor.to('cuda')
 
-model.to('cuda')
+# 2. Initialize Outdoor Engine
+model_outdoor = YOLOWorld(model_path)
+model_outdoor.set_classes([
+    "person", "car", "bicycle", "motorcycle", "bus", "truck", 
+    "traffic light", "fire hydrant", "street sign", "backpack", 
+    "handbag", "dog", "cat", "bench", "storefront", "trash can", 
+    "street light", "building", "tree", "billboard", "fence"
+])
+model_outdoor.to('cuda')
 
+# State management
+models = {"indoor": model_indoor, "outdoor": model_outdoor}
+current_mode = "indoor"
+active_model = models[current_mode]
+
+print("✅ Dual Spatial Engines Armed and Ready on CUDA:0")
+
+
+class EngineModeRequest(BaseModel):
+    mode: str
 
 @app.get("/")
 def health_check() -> Dict[str, str]:
     return {
         "status": "online",
         "engine": "The Core - Autonomous Spatial Intelligence Pipeline",
-        "model": "YOLOv8 Nano"
+        "active_mode": current_mode,
+        "model": "YOLO-World Dual Instances"
     }
+
+@app.post("/api/v1/engine/mode")
+async def set_engine_mode(payload: EngineModeRequest):
+    global current_mode, active_model
+    target_mode = payload.mode.lower()
+
+    if target_mode not in models:
+        raise HTTPException(status_code=400, detail="Invalid mode.")
+
+    # INSTANT SWAP: Zero GPU/CPU tensor mismatch errors!
+    current_mode = target_mode
+    active_model = models[current_mode]
+    
+    print(f"🔄 Switched Spatial Engine Mode to [{current_mode.upper()}]")
+    
+    return {"status": "success", "mode": current_mode}
 
 
 @app.post("/api/v1/register")
 async def register_identity(name: str = Form(...), file: UploadFile = File(...)):
-    """
-    Upload an image of a person to save their face vector into PostgreSQL.
-    """
     if not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File uploaded must be an image.")
 
@@ -86,7 +115,6 @@ async def register_identity(name: str = Form(...), file: UploadFile = File(...))
     result = register_face(name=name, embedding=face_data["embedding"])
     return {"message": f"Successfully registered identity: {name}", "details": result}
 
-
 @app.post("/api/v1/detect")
 async def detect_objects(file: UploadFile = File(...)) -> Dict[str, Any]:
     if not file.content_type.startswith("image/"):
@@ -101,7 +129,8 @@ async def detect_objects(file: UploadFile = File(...)) -> Dict[str, Any]:
             raise HTTPException(status_code=400, detail="Invalid image encoding.")
 
         height, width, _ = frame.shape
-        results = model(frame)
+        # Use active_model dynamically
+        results = active_model(frame, conf=0.15)
 
         detections: List[Dict[str, Any]] = []
         labels_found: List[str] = []
@@ -109,7 +138,7 @@ async def detect_objects(file: UploadFile = File(...)) -> Dict[str, Any]:
         for r in results:
             for box in r.boxes:
                 class_id = int(box.cls[0])
-                label = model.names[class_id]
+                label = active_model.names[class_id]
                 confidence = float(box.conf[0])
                 coords = box.xyxy[0].tolist()
                 
@@ -118,6 +147,7 @@ async def detect_objects(file: UploadFile = File(...)) -> Dict[str, Any]:
                 
                 detection_payload = {
                     "label": label,
+                    "tracking_id": None,
                     "confidence": round(confidence, 3),
                     "bbox": [round(c, 1) for c in coords], 
                     "normalized_bbox": [
@@ -128,7 +158,6 @@ async def detect_objects(file: UploadFile = File(...)) -> Dict[str, Any]:
                     ]
                 }
 
-                # --- CASCADED INFERENCE + VECTOR DATABASE RECOGNITION ---
                 if label == "person":
                     crop_y1, crop_y2 = max(0, y1), min(height, y2)
                     crop_x1, crop_x2 = max(0, x1), min(width, x2)
@@ -137,16 +166,13 @@ async def detect_objects(file: UploadFile = File(...)) -> Dict[str, Any]:
                     if person_crop.size > 0:
                         face_data = extract_face_data(person_crop)
                         if face_data.get("has_face"):
-                            # Perform vector distance lookup in PostgreSQL
                             identity_name = recognize_face(face_data["embedding"])
-
                             detection_payload["identity"] = identity_name
                             detection_payload["demographics"] = {
                                 "age": face_data["age"],
                                 "gender": face_data["gender"],
                                 "emotion": face_data["emotion"]
                             }
-                # ---------------------------------------------------------
 
                 detections.append(detection_payload)
 
@@ -157,7 +183,7 @@ async def detect_objects(file: UploadFile = File(...)) -> Dict[str, Any]:
         return {
             "frame_metadata": {"width": width, "height": height},
             "scene_context": {
-                "inferred_location": inferred_room,
+                "inferred_location": inferred_room if current_mode == "indoor" else "Outdoor Environment",
                 "confidence_score": room_confidence,
                 "status": activity_status
             },
@@ -181,10 +207,8 @@ async def websocket_endpoint(websocket: WebSocket):
     
     try:
         while True:
-            # 1. Receive the Base64 image frame from React
             data = await websocket.receive_text()
             
-            # 2. Decode it back into a standard OpenCV image
             encoded_data = data.split(',')[1] if ',' in data else data
             nparr = np.frombuffer(base64.b64decode(encoded_data), np.uint8)
             frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -192,9 +216,10 @@ async def websocket_endpoint(websocket: WebSocket):
             if frame is None:
                 continue
 
-            # 3. Run YOLOv8 Inference
             height, width, _ = frame.shape
-            results = model(frame)
+            
+            # 🔥 Execute inference using whichever model is currently active
+            results = active_model(frame, conf=0.15)
             
             detections = []
             labels_found = []
@@ -202,7 +227,7 @@ async def websocket_endpoint(websocket: WebSocket):
             for r in results:
                 for box in r.boxes:
                     class_id = int(box.cls[0])
-                    label = model.names[class_id]
+                    label = active_model.names[class_id]
                     confidence = float(box.conf[0])
                     coords = box.xyxy[0].tolist()
                     x1, y1, x2, y2 = map(int, coords)
@@ -211,6 +236,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     
                     detection_payload = {
                         "label": label,
+                        "tracking_id": None,
                         "confidence": round(confidence, 3),
                         "bbox": [round(c, 1) for c in coords],
                         "normalized_bbox": [
@@ -221,7 +247,6 @@ async def websocket_endpoint(websocket: WebSocket):
                         ]
                     }
 
-                    # 4. Cascaded Vector Recognition for Persons
                     if label == "person":
                         crop_y1, crop_y2 = max(0, y1), min(height, y2)
                         crop_x1, crop_x2 = max(0, x1), min(width, x2)
@@ -239,16 +264,14 @@ async def websocket_endpoint(websocket: WebSocket):
                                 }
                     detections.append(detection_payload)
 
-            # 5. Scene Context & Analytics
             person_count = labels_found.count("person")
             inferred_room, room_confidence = analyze_scene_context(labels_found)
             activity_status = determine_activity_status(person_count, inferred_room)
 
-            # 6. Stream the results back to the frontend
             payload = {
                 "frame_metadata": {"width": width, "height": height},
                 "scene_context": {
-                    "inferred_location": inferred_room,
+                    "inferred_location": inferred_room if current_mode == "indoor" else "Outdoor Environment",
                     "confidence_score": room_confidence,
                     "status": activity_status
                 },

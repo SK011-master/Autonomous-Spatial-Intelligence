@@ -38,7 +38,8 @@ export default function App() {
     showKeypoints: true,
     showZones: true,
     soundEnabled: true,
-    detectionThreshold: 0.85,
+    detectionThreshold: 0.15,
+    environmentMode: 'indoor',
   });
 
   const [objects, setObjects] = useState<DetectedObject[]>(INITIAL_DETECTED_OBJECTS);
