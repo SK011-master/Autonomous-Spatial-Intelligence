@@ -7,6 +7,8 @@ import base64
 import numpy as np
 import os
 from typing import List, Dict, Any
+from transformers import pipeline
+from PIL import Image
 
 from scene_graph import analyze_scene_context, determine_activity_status
 from face_engine import extract_face_data
@@ -33,6 +35,11 @@ def startup_event():
 # Model Path Configuration
 models_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 settings.update({"weights_dir": models_dir})
+
+# 🔥 NEW: Force HuggingFace models (like MiDaS) to download strictly into your local 'models' folder
+os.environ["HF_HOME"] = models_dir
+os.environ["TRANSFORMERS_CACHE"] = models_dir
+
 model_path = os.path.join(models_dir, "yolov8s-world.pt")
 
 # =====================================================================
@@ -65,6 +72,11 @@ model_outdoor.to('cuda')
 models = {"indoor": model_indoor, "outdoor": model_outdoor}
 current_mode = "indoor"
 active_model = models[current_mode]
+
+
+# NEW: Initialize 3D Depth Perception Engine on CUDA
+print("⏳ Loading 3D Depth Perception Engine (MiDaS)...")
+depth_estimator = pipeline(task="depth-estimation", model="Intel/dpt-hybrid-midas", device=0)
 
 print("✅ Dual Spatial Engines Armed and Ready on CUDA:0")
 
@@ -218,8 +230,17 @@ async def websocket_endpoint(websocket: WebSocket):
 
             height, width, _ = frame.shape
             
-            # 🔥 Execute inference using whichever model is currently active
+            # Execute YOLO-World inference
             results = active_model(frame, conf=0.15)
+            
+            # 🔥 NEW: Run Depth Estimation only if objects are detected to save GPU cycles
+            depth_map = None
+            if len(results[0].boxes) > 0:
+                pil_frame = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                depth_out = depth_estimator(pil_frame)
+                # Convert the PIL image output to a Numpy array and resize to match webcam frame
+                depth_map = np.array(depth_out["depth"])
+                depth_map = cv2.resize(depth_map, (width, height))
             
             detections = []
             labels_found = []
@@ -233,6 +254,31 @@ async def websocket_endpoint(websocket: WebSocket):
                     x1, y1, x2, y2 = map(int, coords)
                     
                     labels_found.append(label)
+
+                    # 🔥 NEW: Calculate Real 3D Spatial Coordinates (X, Z)
+                    z_meters = 2.5
+                    x_meters = 0.0
+                    
+                    if depth_map is not None:
+                        # Get center pixel of the bounding box
+                        cx = int((x1 + x2) / 2)
+                        cy = int((y1 + y2) / 2)
+                        cx = max(0, min(cx, width - 1))
+                        cy = max(0, min(cy, height - 1))
+                        
+                        # Extract disparity value from the depth map
+                        disparity = depth_map[cy, cx]
+                        
+                        if disparity > 0:
+                            # Convert disparity to approximate meters
+                            raw_z = (255.0 / disparity) * 2.0
+                            # Bound the distance between 0.5m and 30.0m for stability
+                            z_meters = round(min(max(raw_z, 0.5), 30.0), 1)
+                            
+                            # Calculate X offset (Horizontal distance from camera center)
+                            x_offset_px = cx - (width / 2)
+                            x_meters = round((x_offset_px / width) * z_meters * 1.15, 1)
+
                     
                     detection_payload = {
                         "label": label,
@@ -244,7 +290,9 @@ async def websocket_endpoint(websocket: WebSocket):
                             round(coords[1] / height, 4),
                             round(coords[2] / width, 4),
                             round(coords[3] / height, 4)
-                        ]
+                        ],
+                        # 🔥 NEW: Pass the calculated 3D coordinates to the frontend
+                        "spatial3D": {"x": x_meters, "y": 0.0, "z": z_meters}
                     }
 
                     if label == "person":

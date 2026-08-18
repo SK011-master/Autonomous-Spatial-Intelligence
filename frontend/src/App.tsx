@@ -103,7 +103,7 @@ export default function App() {
             w: (d.normalized_bbox[2] - d.normalized_bbox[0]) * 100,
             h: (d.normalized_bbox[3] - d.normalized_bbox[1]) * 100,
           },
-          spatial3D: { x: 0, y: 0, z: 2.5 }, 
+          spatial3D: d.spatial3D || { x: 0, y: 0, z: 2.5 },
           isPerson: d.label === 'person',
           identityName: d.identity !== 'Unknown' ? d.identity : null,
           demographics: d.demographics,
